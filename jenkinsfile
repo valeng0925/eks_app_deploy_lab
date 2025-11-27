@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION         = "${AWS_REGION}"
+        ECR_REPO           = "${ECR_REPO}"
+        CLUSTER_NAME       = "${CLUSTER_NAME}"
+        AWS_CREDENTIALS_ID = "${AWS_CREDENTIALS_ID}"
+        IMAGE_NAME         = "${IMAGE_NAME}"
+        HELM_CHART_PATH    = "${HELM_CHART_PATH}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('AWS Login') {
+            steps {
+                withAWS(credentials: "${AWS_CREDENTIALS_ID}", region: "${AWS_REGION}") {
+                    sh '''
+                    aws sts get-caller-identity
+                    '''
+                }
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                withAWS(credentials: "${AWS_CREDENTIALS_ID}", region: "${AWS_REGION}") {
+                    sh '''
+                    aws ecr get-login-password --region $AWS_REGION \
+                        | docker login --username AWS --password-stdin $ECR_REPO
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                docker build -t $IMAGE_NAME .
+                '''
+            }
+        }
+
+        stage('Tag & Push to ECR') {
+            steps {
+                sh '''
+                TAG=$(date +%s)
+                docker tag $IMAGE_NAME:latest $ECR_REPO:$TAG
+                docker push $ECR_REPO:$TAG
+                echo $TAG > image-tag.txt
+                '''
+            }
+        }
+
+        stage('Update Helm Chart') {
+            steps {
+                sh '''
+                TAG=$(cat image-tag.txt)
+                sed -i "s/tag: .*/tag: \\"${TAG}\\"/" $HELM_CHART_PATH/values.yaml
+                '''
+            }
+        }
+
+        stage('Deploy to EKS with Helm') {
+            steps {
+                withAWS(credentials: "${AWS_CREDENTIALS_ID}", region: "${AWS_REGION}") {
+                    sh '''
+                    aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+                    helm upgrade --install flask-app $HELM_CHART_PATH
+                    '''
+                }
+            }
+        }
+    }
+}
